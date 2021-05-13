@@ -18,13 +18,7 @@
 
 #include <vitasdk.h>
 
-#define printf sceClibPrintf
-#define HOOKS_NUM 1
-
-tai_hook_ref_t hook_ref[HOOKS_NUM];
-static int hook_uid[HOOKS_NUM];
-
-typedef struct SceAVImeParam2 {
+typedef struct SceAvImeParam2 {
 	char *outpath;		// ex:photo0:/SCREENSHOT/kh/2019-11-14-195233.bmp
 	uint32_t path_len;	// strlen(outpath)
 	uint32_t unk_0x08[2];	// ex:0x0, 0xFFFFFFFF
@@ -42,9 +36,9 @@ typedef struct SceAVImeParam2 {
 
 	void *unk_0x38;
 	// more...?
-} ImgParam2;
+} SceAvImeParam2;
 
-typedef struct ImgParam3 {	// size is 0x80?
+typedef struct SceAvImgParam3 {	// size is 0x80?
 	void *jpg_buffer; 
 	uint32_t buffer_size;	// ex:0x4000
 	uint32_t padding08;
@@ -81,8 +75,7 @@ typedef struct ImgParam3 {	// size is 0x80?
 	void *ptr_0x74;
 	char *temp_location2;	// ex:"ur0:temp/screenshot/capture.bmp"
 	void *ptr_0x7C;
-} ImgParam3;
-
+} SceAvImgParam3;
 
 void sanitize(char *in, int len) {
 	char il_chars[] = "<>:/\"\\|?*\n";
@@ -128,63 +121,136 @@ void sanitize(char *in, int len) {
 	}
 }
 
-int hook_func1(int r1, ImgParam2 *param2, ImgParam3 *param3) {
+SceUID cpy_img_uid;
+tai_hook_ref_t cpy_img_ref;
+int cpy_img_patch(int r1, SceAvImeParam2 *param2, SceAvImgParam3 *param3) {
 	
 	int ret;
 	if(param2->type == 2) {
 		SceDateTime time;
 		sceRtcGetCurrentClockLocalTime(&time);
 		
-		char fn[30];
-		sce_paf_private_snprintf(fn, 30, "%04d-%02d-%02d-%02d%02d%02d-%06d",  time.year, time.month, time.day, time.hour, time.minute, time.second, time.microsecond);
-		
-		/*if(!param2->img_ext_len) {
+		char fn[0x20];
+		sce_paf_private_snprintf(fn, sizeof(fn) - 1, "%04d-%02d-%02d-%02d%02d%02d-%06d",  time.year, time.month, time.day, time.hour, time.minute, time.second, time.microsecond);
+
+/*
+		if(!param2->img_ext_len) {
 			param2->img_ext_len = param3->img_ext_len;
 			param2->img_ext = sce_paf_private_malloc(param2->img_ext_len + 1);
 			sce_paf_private_memset(param2->img_ext, 0, param2->img_ext_len  + 1);
 			sce_paf_private_memcpy(param2->img_ext, param3->img_ext, param2->img_ext_len);
-		}*/
+		}
+*/
 
 		param2->outpath = sce_paf_private_malloc(PATH_MAX);		
 	
 		char *titlename = (param2->title_len != 0) ? param2->titlename : "Other";
 		
 		sanitize(titlename, param2->title_len);
-		param2->path_len = sce_paf_private_snprintf(param2->outpath, PATH_MAX - sizeof(fn) - param2->img_ext_len, "photo0:/SCREENSHOT/%s", titlename);
-		sceIoMkdir(param2->outpath, 6);
-		
-		
+
+		int use_external_device = 0;
+		SceIoStat stat;
+
+		if(sceIoGetstat("sd0:", &stat) == 0){
+
+			use_external_device = 1;
+
+			if(sceIoGetstat("sd0:reScreeny/", &stat) != 0)
+				sceIoMkdir("sd0:reScreeny/", 0666);
+
+			param2->path_len = sce_paf_private_snprintf(
+				param2->outpath,
+				PATH_MAX - sizeof(fn) - param2->img_ext_len,
+				"sd0:reScreeny/%s", titlename
+			);
+		}else{
+			param2->path_len = sce_paf_private_snprintf(
+				param2->outpath,
+				PATH_MAX - sizeof(fn) - param2->img_ext_len,
+				"photo0:/SCREENSHOT/%s", titlename
+			);
+		}
+
+		if(sceIoGetstat(param2->outpath, &stat) != 0)
+			sceIoMkdir(param2->outpath, (use_external_device != 0) ? 0666 : 6);
+
 		sce_paf_private_snprintf(param2->outpath + param2->path_len, PATH_MAX - param2->path_len - 1, "/%s%s", fn, param3->img_ext);
 		param2->path_len = sce_paf_private_strlen(param2->outpath);
 		
 		sce_paf_private_memset(param2->titlename, 0, param2->title_len);
 		sce_paf_private_memcpy(param2->titlename, param3->titlename, param2->title_len);
-		
+
 		ret = 0;
-	} else
-		ret = TAI_CONTINUE(int, hook_ref[0], r1, param2, param3);
+	}else{
+		ret = TAI_CONTINUE(int, cpy_img_ref, r1, param2, param3);
+	}
+
 	return ret;
 }
 
+int av_media_patch(tai_module_info_t *pInfo){
+
+	SceUID modid = pInfo->modid;
+
+	switch(pInfo->module_nid){
+	// Devkit
+	case 0x1656745F: // 3.60
+	case 0x6A9DC40D: // 3.61
+	case 0x1E1F5265: // 3.63
+	case 0x135F2E28: // 3.65
+	case 0xD55DFE9C: // 3.67
+	case 0x035EAA17: // 3.68
+
+	// Testkit
+	case 0x3FE87731: // 3.60
+	case 0x2FB17074: // 3.61
+	case 0x061EA4BA: // 3.63
+	case 0x4DDE4533: // 3.65
+	case 0x787F0022: // 3.67
+	case 0x62BE8716: // 3.68
+		cpy_img_uid = taiHookFunctionOffset(&cpy_img_ref, modid, 0, 0x3e64, 1, cpy_img_patch);
+		break;
+
+	// Retail
+	case 0x18B3FEEF: // 3.60
+	case 0xE52E9179: // 3.61
+	case 0x0980949E: // 3.63
+	case 0x2708938B: // 3.65
+	case 0xEFCA5EE7: // 3.67
+	case 0xDE405E39: // 3.68
+	case 0x6CF9DFFE: // 3.69
+	case 0xDFB649A5: // 3.70
+	case 0x3B8766B7: // 3.71
+	case 0x42335CC5: // 3.72
+	case 0x1E0D7085: // 3.73
+		cpy_img_uid = taiHookFunctionOffset(&cpy_img_ref, modid, 0, 0x3e30, 1, cpy_img_patch);
+		break;
+
+	default:
+		return -1;
+	}
+
+	return 0;
+}
 
 void _start() __attribute__ ((weak, alias ("module_start")));
+int module_start(SceSize argc, const void *args){
 
-int module_start(SceSize argc, const void *args) {
 	tai_module_info_t tai_info;
 	tai_info.size = sizeof(tai_module_info_t);
-	taiGetModuleInfo("SceAvMediaService", &tai_info);
 
-	switch(tai_info.module_nid){
-		case 0x1656745F: // 3.60 Devkit
-			hook_uid[0] = taiHookFunctionOffset(&hook_ref[0], tai_info.modid, 0, 0x3e64, 1, hook_func1);
-			break;
-
-		default: //Retail 3.73 - 3.60
-			hook_uid[0] = taiHookFunctionOffset(&hook_ref[0], tai_info.modid, 0, 0x3e30, 1, hook_func1);
+	if(taiGetModuleInfo("SceAvMediaService", &tai_info) == 0){
+		av_media_patch(&tai_info);
+		return SCE_KERNEL_START_SUCCESS;
 	}
- return SCE_KERNEL_START_SUCCESS;
+
+	return SCE_KERNEL_START_NO_RESIDENT;
 }
-int module_stop(SceSize argc, const void *args) {
-	if (hook_uid[0] >= 0) taiHookRelease(hook_uid[0],hook_ref[0]);
+
+int module_stop(SceSize argc, const void *args){
+
+	if(cpy_img_uid > 0)
+		taiHookRelease(cpy_img_uid, cpy_img_ref);
+
 	return SCE_KERNEL_STOP_SUCCESS;
 }
